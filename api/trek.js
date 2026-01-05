@@ -12,10 +12,12 @@ export default async function handler(req, res) {
     const parsedFoods = parseFoodsWithQuantity(q);
 
     const items = [];
-    let totalCalories = 0;
-    let totalProtein = 0;
-    let totalCarbs = 0;
-    let totalFat = 0;
+    let totals = {
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0
+    };
 
     for (const { food, qty } of parsedFoods) {
       const base = await getNutritionFromAI(food);
@@ -31,22 +33,18 @@ export default async function handler(req, res) {
 
       items.push(item);
 
-      totalCalories += item.calories_kcal;
-      totalProtein += item.protein_g;
-      totalCarbs += item.carbs_g;
-      totalFat += item.fat_g;
+      totals.calories += item.calories_kcal;
+      totals.protein += item.protein_g;
+      totals.carbs += item.carbs_g;
+      totals.fat += item.fat_g;
     }
 
-    const recommendations = generateRecommendations({
-      calories: totalCalories,
-      protein: totalProtein,
-      carbs: totalCarbs,
-      fat: totalFat
-    });
+    // 🔥 AI-BASED RECOMMENDATIONS
+    const recommendations = await getRecommendationsFromAI(totals);
 
     return res.status(200).json({
       items,
-      total_calories_kcal: Math.round(totalCalories),
+      total_calories_kcal: Math.round(totals.calories),
       recommendations
     });
 
@@ -71,19 +69,19 @@ function parseFoodsWithQuantity(input) {
     .filter(f => f.food);
 }
 
-/* ================= AI ENGINE ================= */
+/* ================= NUTRITION AI ================= */
 
 async function getNutritionFromAI(food) {
   const SYSTEM_PROMPT = `
 You are a food nutrition engine for health apps like HealthifyMe.
 
 RULES:
-- Return JSON ONLY.
-- SINGLE serving.
-- Realistic values.
-- NEVER return null.
+- JSON ONLY
+- Single serving
+- Realistic values
+- No null values
 
-SERVING SIZE MUST BE ONE OF:
+Serving size MUST be one of:
 "1 cup", "1 bowl", "1 plate", "1 piece", "1 slice", "1 spoon", "1 glass"
 
 OUTPUT FORMAT:
@@ -113,11 +111,61 @@ ${food}
   return sanitizeNutrition(JSON.parse(text), food);
 }
 
+/* ================= AI RECOMMENDATIONS ================= */
+
+async function getRecommendationsFromAI({ calories, protein, carbs, fat }) {
+  const SYSTEM_PROMPT = `
+You are a nutrition assistant for a food tracking app.
+
+TASK:
+- Analyze the given nutrition totals.
+- Give practical, everyday suggestions.
+- Use phrases like: "increase", "reduce", "balance".
+- Do NOT give medical advice.
+- Do NOT mention diseases or conditions.
+- Keep recommendations general and safe.
+
+OUTPUT RULES:
+- JSON ONLY
+- Array of short strings
+- No emojis
+- No numbers unless necessary
+
+OUTPUT FORMAT:
+{
+  "recommendations": [
+    "string",
+    "string"
+  ]
+}
+`.trim();
+
+  const prompt = `
+SYSTEM:
+${SYSTEM_PROMPT}
+
+TOTAL NUTRITION:
+Calories: ${Math.round(calories)} kcal
+Protein: ${Math.round(protein)} g
+Carbs: ${Math.round(carbs)} g
+Fat: ${Math.round(fat)} g
+`.trim();
+
+  const res = await fetch(
+    `https://text.pollinations.ai/${encodeURIComponent(prompt)}`
+  );
+
+  const text = await res.text();
+  const json = JSON.parse(text);
+
+  return Array.isArray(json.recommendations) ? json.recommendations : [];
+}
+
 /* ================= SANITIZER ================= */
 
-function sanitizeNutrition(data, foodFallback) {
+function sanitizeNutrition(data, fallback) {
   return {
-    food_name: data.food_name || capitalize(foodFallback),
+    food_name: data.food_name || capitalize(fallback),
     serving_size: normalizeServingSize(data.serving_size),
     calories_kcal: safeNum(data.calories_kcal),
     protein_g: safeNum(data.protein_g),
@@ -126,62 +174,21 @@ function sanitizeNutrition(data, foodFallback) {
   };
 }
 
-/* ================= SERVING NORMALIZER ================= */
+/* ================= SERVING HELPERS ================= */
 
 function normalizeServingSize(size = "") {
   const allowed = [
-    "1 cup",
-    "1 bowl",
-    "1 plate",
-    "1 piece",
-    "1 slice",
-    "1 spoon",
-    "1 glass"
+    "1 cup", "1 bowl", "1 plate",
+    "1 piece", "1 slice", "1 spoon", "1 glass"
   ];
-
   if (allowed.includes(size)) return size;
-
-  const s = size.toLowerCase();
-  if (s.includes("pizza") || s.includes("bread")) return "1 slice";
-  if (s.includes("rice") || s.includes("pasta")) return "1 cup";
-  if (s.includes("soup") || s.includes("sambar")) return "1 bowl";
-  if (s.includes("milk") || s.includes("drink")) return "1 glass";
-
   return "1 plate";
 }
 
-/* ================= SERVING FORMATTER (NEW) ================= */
-
 function formatServingSize(qty, baseServing) {
   const unit = baseServing.replace(/^1\s+/, "").trim();
-
   if (qty === 1) return `1 ${unit}`;
-  if (unit.endsWith("s")) return `${qty} ${unit}`;
-
-  return `${qty} ${unit}s`;
-}
-
-/* ================= RECOMMENDATIONS ================= */
-
-function generateRecommendations({ calories, protein, carbs, fat }) {
-  const recs = [];
-
-  if (protein < 15) recs.push("Increase protein intake using eggs, dal, paneer, or lean meat.");
-  else recs.push("Protein intake looks balanced.");
-
-  if (carbs > 60) recs.push("Reduce refined carbohydrates; prefer whole grains.");
-  else recs.push("Carbohydrate intake is moderate.");
-
-  if (fat > 30) recs.push("Reduce fried or oily foods.");
-  else recs.push("Fat intake appears balanced.");
-
-  if (calories > 700) recs.push("Consider reducing portion size for calorie control.");
-  else recs.push("Calorie intake is reasonable for one meal.");
-
-  recs.push("Add vegetables or fruits for fiber and micronutrients.");
-  recs.push("Drink enough water for digestion.");
-
-  return recs;
+  return unit.endsWith("s") ? `${qty} ${unit}` : `${qty} ${unit}s`;
 }
 
 /* ================= HELPERS ================= */
