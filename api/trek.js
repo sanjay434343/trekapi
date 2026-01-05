@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // ---------------- CORS ----------------
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -10,14 +9,26 @@ export default async function handler(req, res) {
   }
 
   try {
-    const foods = splitFoods(q);
+    const parsedFoods = parseFoodsWithQuantity(q);
+
     const items = [];
     let totalCalories = 0;
 
-    for (const food of foods) {
-      const nutrition = await getNutritionFromAI(food);
-      items.push(nutrition);
-      totalCalories += nutrition.calories_kcal;
+    for (const { food, qty } of parsedFoods) {
+      const base = await getNutritionFromAI(food);
+
+      // Multiply by quantity safely
+      const item = {
+        food_name: base.food_name,
+        serving_size: `${qty} × ${base.serving_size}`,
+        calories_kcal: safeMul(base.calories_kcal, qty),
+        protein_g: safeMul(base.protein_g, qty),
+        carbs_g: safeMul(base.carbs_g, qty),
+        fat_g: safeMul(base.fat_g, qty)
+      };
+
+      items.push(item);
+      totalCalories += item.calories_kcal;
     }
 
     return res.status(200).json({
@@ -30,75 +41,44 @@ export default async function handler(req, res) {
   }
 }
 
-/* ================= FOOD SPLITTER ================= */
+/* ================= QUANTITY PARSER ================= */
 
-function splitFoods(input) {
+function parseFoodsWithQuantity(input) {
   return input
     .toLowerCase()
     .split(/with|,|\+|and|&/)
-    .map(f => f.trim())
-    .filter(Boolean);
+    .map(part => {
+      const match = part.trim().match(/^(\d+)\s+(.*)$/);
+      return {
+        qty: match ? parseInt(match[1], 10) : 1,
+        food: match ? match[2].trim() : part.trim()
+      };
+    })
+    .filter(f => f.food);
 }
 
-/* ================= AI NUTRITION ENGINE ================= */
+/* ================= AI ENGINE ================= */
 
 async function getNutritionFromAI(food) {
   const SYSTEM_PROMPT = `
-You are a professional food nutrition analysis engine designed for consumer health apps
-(similar to HealthifyMe, MyFitnessPal, Cronometer).
+You are a food nutrition engine for health apps.
 
-Your job is to analyze user-mentioned foods and return accurate, realistic nutrition data.
+Rules:
+- Return JSON ONLY.
+- Assume SINGLE serving.
+- Indian home-style preparation.
+- Realistic values only.
+- Never return null.
 
-CORE RESPONSIBILITIES
-- Identify edible food items ONLY.
-- Split multiple foods into separate items.
-- Assume STANDARD SINGLE SERVING unless specified.
-- Use Indian food standards and home-style preparation.
-
-FOOD PARSING
-- Detect: "with", ",", "+", "and", "&"
-- Ignore non-food words.
-- If not food, return INVALID_FOOD_INPUT.
-
-NUTRITION ACCURACY
-- Use realistic averages.
-- No exaggeration.
-- Calories must match macros logically.
-- Prefer conservative values.
-
-INDIAN CONTEXT
-- Dosa = plain dosa
-- Sambar = toor dal + vegetables
-- Chapati = no butter
-- Rice = cooked white rice
-
-SERVING SIZES
-- Dosa → 1 medium dosa (~120g)
-- Idli → 1 medium idli
-- Sambar → 1 cup (~150ml)
-
-OUTPUT RULES
-- JSON ONLY
-- No explanations
-- No markdown
-- No ranges
-- Numbers only
-- Max 1 decimal
-
-OUTPUT FORMAT
-
+Output format:
 {
-  "food_name": "<string>",
-  "serving_size": "<string>",
+  "food_name": "",
+  "serving_size": "",
   "calories_kcal": number,
   "protein_g": number,
   "carbs_g": number,
   "fat_g": number
 }
-
-VALIDATION
-- Values must be nutritionally plausible.
-- If uncertain, choose lower-calorie estimate.
 `.trim();
 
   const prompt = `
@@ -113,31 +93,42 @@ ${food}
     `https://text.pollinations.ai/${encodeURIComponent(prompt)}`
   );
 
-  if (!res.ok) {
-    throw new Error("AI nutrition service failed");
-  }
-
   const text = await res.text();
 
   let json;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error("Invalid AI response format");
+    throw new Error("AI returned invalid JSON");
   }
 
+  return sanitizeNutrition(json, food);
+}
+
+/* ================= SANITIZER ================= */
+
+function sanitizeNutrition(data, foodFallback) {
   return {
-    food_name: json.food_name,
-    serving_size: json.serving_size,
-    calories_kcal: Math.round(json.calories_kcal),
-    protein_g: round(json.protein_g),
-    carbs_g: round(json.carbs_g),
-    fat_g: round(json.fat_g)
+    food_name: data.food_name || capitalize(foodFallback),
+    serving_size: data.serving_size || "1 standard serving",
+    calories_kcal: safeNum(data.calories_kcal),
+    protein_g: safeNum(data.protein_g),
+    carbs_g: safeNum(data.carbs_g),
+    fat_g: safeNum(data.fat_g)
   };
 }
 
 /* ================= HELPERS ================= */
 
-function round(v) {
+function safeNum(v) {
+  if (typeof v !== "number" || isNaN(v)) return 0;
   return Math.round(v * 10) / 10;
+}
+
+function safeMul(v, m) {
+  return Math.round(safeNum(v) * m * 10) / 10;
+}
+
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
