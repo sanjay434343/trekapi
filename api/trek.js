@@ -1,123 +1,143 @@
-import http from "http";
-import url from "url";
-
-/* ---------------- CONFIG ---------------- */
-
-const PORT = process.env.PORT || 3000;
-const POLLINATIONS_TEXT_API = "https://text.pollinations.ai";
-
-/* ---------------- STRICT SYSTEM PROMPT ---------------- */
-
-const SYSTEM_PROMPT = `
-You are a food nutrition analysis engine.
-
-PRIMARY TASK
-- Analyze food items and return nutrition data.
-- If the input contains multiple foods (e.g., "dosa with sambar"),
-  split them into separate food items.
-- Treat each food independently.
-
-INPUT RULES
-- Input is a food description.
-- Detect separators: "with", ",", "+", "and".
-- Assume STANDARD SINGLE SERVING for EACH item.
-- Use Indian food standards if applicable.
-- If input is not edible food, return INVALID_FOOD_INPUT.
-
-ANALYSIS RULES
-- Use realistic real-world nutrition values.
-- No ranges. Single numeric values only.
-- Calories must logically match macros.
-- Assume most common preparation.
-- No medical advice.
-
-OUTPUT RULES
-- JSON ONLY.
-- No extra text.
-
-OUTPUT FORMAT
-
-{
-  "items": [
-    {
-      "food_name": "<string>",
-      "serving_size": "<string>",
-      "calories_kcal": <number>,
-      "protein_g": <number>,
-      "carbs_g": <number>,
-      "fat_g": <number>
-    }
-  ],
-  "total_calories_kcal": <number>
-}
-`.trim();
-
-/* ---------------- SERVER ---------------- */
-
-const server = http.createServer(async (req, res) => {
-  // CORS
+export default async function handler(req, res) {
+  // ---------------- CORS ----------------
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  const parsedUrl = url.parse(req.url, true);
-
-  if (parsedUrl.pathname !== "/api/trek") {
-    res.writeHead(404);
-    return res.end("Not Found");
-  }
-
-  const query = parsedUrl.query.q;
-
-  if (!query) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({
-      ok: false,
-      error: "Missing query parameter ?q="
-    }));
+  const q = req.query.q;
+  if (!q) {
+    return res.status(400).json({ error: "Missing ?q parameter" });
   }
 
   try {
-    const prompt = `
+    const foods = splitFoods(q);
+    const items = [];
+    let totalCalories = 0;
+
+    for (const food of foods) {
+      const nutrition = await getNutritionFromAI(food);
+      items.push(nutrition);
+      totalCalories += nutrition.calories_kcal;
+    }
+
+    return res.status(200).json({
+      items,
+      total_calories_kcal: Math.round(totalCalories)
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+/* ================= FOOD SPLITTER ================= */
+
+function splitFoods(input) {
+  return input
+    .toLowerCase()
+    .split(/with|,|\+|and|&/)
+    .map(f => f.trim())
+    .filter(Boolean);
+}
+
+/* ================= AI NUTRITION ENGINE ================= */
+
+async function getNutritionFromAI(food) {
+  const SYSTEM_PROMPT = `
+You are a professional food nutrition analysis engine designed for consumer health apps
+(similar to HealthifyMe, MyFitnessPal, Cronometer).
+
+Your job is to analyze user-mentioned foods and return accurate, realistic nutrition data.
+
+CORE RESPONSIBILITIES
+- Identify edible food items ONLY.
+- Split multiple foods into separate items.
+- Assume STANDARD SINGLE SERVING unless specified.
+- Use Indian food standards and home-style preparation.
+
+FOOD PARSING
+- Detect: "with", ",", "+", "and", "&"
+- Ignore non-food words.
+- If not food, return INVALID_FOOD_INPUT.
+
+NUTRITION ACCURACY
+- Use realistic averages.
+- No exaggeration.
+- Calories must match macros logically.
+- Prefer conservative values.
+
+INDIAN CONTEXT
+- Dosa = plain dosa
+- Sambar = toor dal + vegetables
+- Chapati = no butter
+- Rice = cooked white rice
+
+SERVING SIZES
+- Dosa → 1 medium dosa (~120g)
+- Idli → 1 medium idli
+- Sambar → 1 cup (~150ml)
+
+OUTPUT RULES
+- JSON ONLY
+- No explanations
+- No markdown
+- No ranges
+- Numbers only
+- Max 1 decimal
+
+OUTPUT FORMAT
+
+{
+  "food_name": "<string>",
+  "serving_size": "<string>",
+  "calories_kcal": number,
+  "protein_g": number,
+  "carbs_g": number,
+  "fat_g": number
+}
+
+VALIDATION
+- Values must be nutritionally plausible.
+- If uncertain, choose lower-calorie estimate.
+`.trim();
+
+  const prompt = `
 SYSTEM:
 ${SYSTEM_PROMPT}
 
-USER_INPUT:
-${query}
-    `.trim();
+FOOD:
+${food}
+`.trim();
 
-    const pollinationRes = await fetch(
-      `${POLLINATIONS_TEXT_API}/${encodeURIComponent(prompt)}`
-    );
+  const res = await fetch(
+    `https://text.pollinations.ai/${encodeURIComponent(prompt)}`
+  );
 
-    if (!pollinationRes.ok) {
-      throw new Error("Pollinations API failed");
-    }
-
-    const text = await pollinationRes.text();
-
-    // Ensure clean JSON output
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      throw new Error("Invalid AI response format");
-    }
-
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(json));
-
-  } catch (err) {
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      ok: false,
-      error: err.message
-    }));
+  if (!res.ok) {
+    throw new Error("AI nutrition service failed");
   }
-});
 
-/* ---------------- START ---------------- */
+  const text = await res.text();
 
-server.listen(PORT, () => {
-  console.log(`Food Nutrition API running on port ${PORT}`);
-});
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid AI response format");
+  }
+
+  return {
+    food_name: json.food_name,
+    serving_size: json.serving_size,
+    calories_kcal: Math.round(json.calories_kcal),
+    protein_g: round(json.protein_g),
+    carbs_g: round(json.carbs_g),
+    fat_g: round(json.fat_g)
+  };
+}
+
+/* ================= HELPERS ================= */
+
+function round(v) {
+  return Math.round(v * 10) / 10;
+}
