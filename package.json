@@ -1,0 +1,13 @@
+{
+  "name": "food-nutrition-api",
+  "version": "1.0.0",
+  "description": "Healthify-style food nutrition API using Pollinations",
+  "type": "module",
+  "scripts": {
+    "dev": "node api/trek.js",
+    "start": "node api/trek.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
